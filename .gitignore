@@ -1,0 +1,3 @@
+# compiled helper (rebuild with ./build.sh)
+/forge-workspace-id
+*.o

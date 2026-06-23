@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Drop-in `forge` wrapper: import any new claude-vault conversations into the
+# forge DB, then exec the real forge binary. Install by putting this earlier on
+# PATH than the real binary, or symlink it and point REAL_FORGE at the binary.
+#
+#   ln -sf "$PWD/forge" ~/.local/bin/forge-with-import
+# or rename the real binary to `forge-bin` and drop this in as `forge`.
+set -euo pipefail
+# Resolve symlinks so HERE is the project dir even when this wrapper is
+# symlinked into ~/.local/bin.
+SELF="$(readlink -f "$0")"
+HERE="$(cd "$(dirname "$SELF")" && pwd)"
+
+# Locate the real forge binary (override with REAL_FORGE).
+REAL_FORGE="${REAL_FORGE:-}"
+if [ -z "$REAL_FORGE" ]; then
+  for cand in "$HOME/.local/bin/forge-bin" "$HOME/.cargo/bin/forge" "/usr/local/bin/forge"; do
+    [ -x "$cand" ] && REAL_FORGE="$cand" && break
+  done
+fi
+if [ -z "$REAL_FORGE" ]; then
+  echo "real forge binary not found — set REAL_FORGE" >&2
+  exit 1
+fi
+
+# Best-effort import; never block forge from starting if it fails.
+python3 "$HERE/import.py" || echo "[forge-vault-import] skipped (non-fatal)" >&2
+
+exec "$REAL_FORGE" "$@"
