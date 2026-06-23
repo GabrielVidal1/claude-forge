@@ -1,3 +1,6 @@
-# compiled helper (rebuild with ./build.sh)
-/forge-workspace-id
+# Rust build artifacts
+/target
+
+# misc
 *.o
+.DS_Store
