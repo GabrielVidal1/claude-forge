@@ -22,8 +22,11 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-apple-darwin
             os: macos-latest
+          # Cross-compile the Intel-mac binary on the Apple-Silicon runner;
+          # GitHub's free macos-13 (Intel) runners are deprecated and queue
+          # indefinitely.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
