@@ -1,38 +1,54 @@
-//! claude-to-forge — import Claude Code conversations archived by claude-vault
-//! into the Forge (forgecode) database, so past Claude Code chats appear in
-//! Forge's history.
+//! claude-forge — move AI coding-agent conversations between Claude Code and
+//! Forge (forgecode) with full metadata, backed by a local sync-state database.
 //!
-//! A single self-contained binary that does both jobs the original two-part
-//! tool needed: it reproduces Forge's `workspace_id` natively (no helper
-//! binary) and performs the idempotent import.
+//! v1 wires the Claude → Forge direction: it reads Claude Code's native JSONL
+//! session files directly and writes rich Forge `context` rows that preserve
+//! tool calls, tool results, usage and reasoning — keeping a `sync.db` so
+//! repeated runs are idempotent. The architecture is agent-neutral so more
+//! agents and the reverse direction can be added without redesign.
+//!
+//! See `PLAN.md` for the full design and the data-format references.
 
-mod import;
+mod canonical;
+mod claude;
+mod forge;
+mod state;
+mod sync;
 mod workspace_id;
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 
-/// Default location of the claude-vault SQLite archive.
-fn default_vault_db() -> PathBuf {
-    home().join(".local/share/claude-vault/vault.db")
-}
-
-/// Default location of the Forge SQLite database.
-fn default_forge_db() -> PathBuf {
-    home().join(".forge/.forge.db")
-}
+use claude::Filters;
+use state::StateDb;
 
 fn home() -> PathBuf {
     dirs::home_dir().expect("could not determine home directory")
 }
 
+fn default_claude_dir() -> PathBuf {
+    home().join(".claude")
+}
+
+fn default_forge_db() -> PathBuf {
+    home().join(".forge/.forge.db")
+}
+
+/// `$XDG_DATA_HOME/claude-forge/sync.db` (falls back to `~/.local/share`).
+fn default_state_db() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| home().join(".local/share"))
+        .join("claude-forge/sync.db")
+}
+
 #[derive(Parser)]
 #[command(
-    name = "claude-to-forge",
+    name = "claude-forge",
     version,
-    about = "Import claude-vault conversations into the Forge database",
+    about = "Sync Claude Code conversations into Forge with full metadata",
     long_about = None
 )]
 struct Cli {
@@ -40,28 +56,46 @@ struct Cli {
     command: Option<Command>,
 
     #[command(flatten)]
-    import: ImportArgs,
+    sync: SyncArgs,
 }
 
 #[derive(clap::Args)]
-struct ImportArgs {
-    /// Path to the claude-vault SQLite archive.
-    #[arg(long, env = "VAULT_DB")]
-    vault_db: Option<PathBuf>,
+struct SyncArgs {
+    /// Path to the Claude Code config directory (contains `projects/`).
+    #[arg(long, env = "CLAUDE_DIR")]
+    claude_dir: Option<PathBuf>,
 
     /// Path to the Forge SQLite database.
     #[arg(long, env = "FORGE_DB")]
     forge_db: Option<PathBuf>,
 
-    /// Show what would be imported without writing to the Forge DB.
+    /// Path to claude-forge's sync-state database.
+    #[arg(long, env = "CLAUDE_FORGE_DB")]
+    state_db: Option<PathBuf>,
+
+    /// Only sync sessions updated on or after this date (YYYY-MM-DD).
+    #[arg(long)]
+    since: Option<String>,
+
+    /// Only sync sessions whose working directory contains this substring.
+    #[arg(long)]
+    project: Option<String>,
+
+    /// Report what would happen without writing to any database.
     #[arg(long)]
     dry_run: bool,
+
+    /// Verbose per-session logging.
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Import any new claude-vault sessions into the Forge DB (default).
-    Import(ImportArgs),
+    /// Sync new Claude Code sessions into Forge (default).
+    Sync(SyncArgs),
+    /// Show what is tracked: per-agent counts and the Forge DB row count.
+    Status(SyncArgs),
     /// Print the Forge workspace_id for a directory path.
     WorkspaceId {
         /// Directory path (defaults to the current working directory).
@@ -80,39 +114,93 @@ fn main() -> Result<()> {
             println!("{}", workspace_id::workspace_id(&cwd));
             Ok(())
         }
-        Some(Command::Import(args)) => run_import(args),
-        None => run_import(cli.import),
+        Some(Command::Status(args)) => run_status(args),
+        Some(Command::Sync(args)) => run_sync(args),
+        None => run_sync(cli.sync),
     }
 }
 
-fn run_import(args: ImportArgs) -> Result<()> {
-    let vault_db = args.vault_db.unwrap_or_else(default_vault_db);
-    let forge_db = args.forge_db.unwrap_or_else(default_forge_db);
+fn resolve(args: &SyncArgs) -> (PathBuf, PathBuf, PathBuf) {
+    (
+        args.claude_dir.clone().unwrap_or_else(default_claude_dir),
+        args.forge_db.clone().unwrap_or_else(default_forge_db),
+        args.state_db.clone().unwrap_or_else(default_state_db),
+    )
+}
 
-    if !vault_db.exists() {
+/// Parse `--since YYYY-MM-DD` into a UTC start-of-day instant.
+fn parse_since(s: &str) -> Result<DateTime<Utc>> {
+    let date = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .with_context(|| format!("invalid --since date {s:?} (expected YYYY-MM-DD)"))?;
+    Ok(Utc.from_utc_datetime(&date.and_hms_opt(0, 0, 0).unwrap()))
+}
+
+fn run_sync(args: SyncArgs) -> Result<()> {
+    let (claude_dir, forge_db, state_db) = resolve(&args);
+
+    if !claude_dir.exists() {
         eprintln!(
-            "[claude-to-forge] vault db not found at {} — nothing to import",
-            vault_db.display()
+            "[claude-forge] claude dir not found at {} — nothing to sync",
+            claude_dir.display()
         );
         return Ok(());
     }
     if !forge_db.exists() {
         eprintln!(
-            "[claude-to-forge] forge db not found at {} — run forge once first",
+            "[claude-forge] forge db not found at {} — run forge once first",
             forge_db.display()
         );
         return Ok(());
     }
 
-    let report = import::import(&vault_db, &forge_db, args.dry_run)?;
-    let prefix = if args.dry_run {
-        "[claude-to-forge] (dry-run) would insert"
+    let filters = Filters {
+        since: args.since.as_deref().map(parse_since).transpose()?,
+        project: args.project.clone(),
+    };
+
+    let report = sync::sync(sync::Options {
+        claude_dir: &claude_dir,
+        forge_db: &forge_db,
+        state_db: &state_db,
+        filters,
+        dry_run: args.dry_run,
+        verbose: args.verbose,
+    })?;
+
+    let verb = if args.dry_run {
+        "(dry-run) would insert"
     } else {
-        "[claude-to-forge] inserted"
+        "inserted"
     };
     eprintln!(
-        "{} {}, already-present {}, empty-skipped {}",
-        prefix, report.inserted, report.skipped, report.empty
+        "[claude-forge] {} {} of {} sessions; already-present {}, drift {}",
+        verb, report.inserted, report.total, report.skipped_present, report.drifted
     );
+    Ok(())
+}
+
+fn run_status(args: SyncArgs) -> Result<()> {
+    let (_claude_dir, forge_db, state_db) = resolve(&args);
+
+    let state = StateDb::open(&state_db)?;
+    let counts = state.counts()?;
+
+    let forge_rows: i64 = if forge_db.exists() {
+        let conn = forge::open(&forge_db)?;
+        conn.query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))?
+    } else {
+        -1
+    };
+
+    println!("state db: {}", state_db.display());
+    println!("  conversations tracked : {}", counts.conversations);
+    println!("  claude links          : {}", counts.claude_links);
+    println!("  forge links (written) : {}", counts.forge_links);
+    println!("forge db: {}", forge_db.display());
+    if forge_rows >= 0 {
+        println!("  total conversations   : {forge_rows}");
+    } else {
+        println!("  (not found)");
+    }
     Ok(())
 }

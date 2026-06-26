@@ -2,7 +2,7 @@
 name = "claude-forge"
 version = "0.1.0"
 edition = "2021"
-description = "Import Claude Code conversations archived by claude-vault into the Forge (forgecode) database."
+description = "Sync Claude Code conversations into Forge (forgecode) with full metadata — tool calls, results, usage and reasoning."
 license = "MIT"
 repository = "https://github.com/GabrielVidal1/claude-forge"
 readme = "README.md"
@@ -15,11 +15,16 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "5"
 rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 strip = true

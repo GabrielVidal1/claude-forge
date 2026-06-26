@@ -29,6 +29,10 @@ pub fn workspace_id(cwd: &str) -> i64 {
 /// one-segment step when nothing matches (e.g. the directory has since been
 /// deleted) — the resulting path string still hashes deterministically, it just
 /// may not match a live workspace.
+///
+/// Kept available (not used by the Claude→Forge path, which has the real `cwd`)
+/// as a fallback for future sources that only carry the dash-encoded name.
+#[allow(dead_code)]
 pub fn resolve_cwd(project: &str) -> String {
     let segs: Vec<&str> = project.split('-').filter(|s| !s.is_empty()).collect();
     let mut cur = PathBuf::from("/");
@@ -54,6 +58,7 @@ pub fn resolve_cwd(project: &str) -> String {
     path_to_string(&cur)
 }
 
+#[allow(dead_code)]
 fn path_to_string(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
@@ -66,7 +71,10 @@ mod tests {
     #[test]
     fn known_workspace_ids() {
         assert_eq!(workspace_id("/home/gabrielvidal"), -8599109238221935417);
-        assert_eq!(workspace_id("/home/gabrielvidal/homelab"), 8968329562854484240);
+        assert_eq!(
+            workspace_id("/home/gabrielvidal/homelab"),
+            8968329562854484240
+        );
         assert_eq!(
             workspace_id("/home/gabrielvidal/homelab/projects/zipgo"),
             -3877205949088219147

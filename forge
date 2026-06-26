@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Drop-in `forge` wrapper: import any new claude-vault conversations into the
-# forge DB, then exec the real forge binary. Install by putting this earlier on
-# PATH than the real binary, or symlink it and point REAL_FORGE at the binary.
+# Drop-in `forge` wrapper: sync any new Claude Code conversations into the Forge
+# DB (full metadata), then exec the real forge binary. Install by putting this
+# earlier on PATH than the real binary, or symlink it and point REAL_FORGE at
+# the binary.
 #
-#   ln -sf "$PWD/forge" ~/.local/bin/forge-with-import
+#   ln -sf "$PWD/forge" ~/.local/bin/forge-with-sync
 # or rename the real binary to `forge-bin` and drop this in as `forge`.
 set -euo pipefail
 # Resolve symlinks so HERE is the project dir even when this wrapper is
@@ -23,7 +24,19 @@ if [ -z "$REAL_FORGE" ]; then
   exit 1
 fi
 
-# Best-effort import; never block forge from starting if it fails.
-python3 "$HERE/import.py" || echo "[forge-vault-import] skipped (non-fatal)" >&2
+# Locate claude-forge (prefer an installed binary, fall back to the project one).
+CLAUDE_FORGE="${CLAUDE_FORGE:-}"
+if [ -z "$CLAUDE_FORGE" ]; then
+  for cand in "$HOME/.local/bin/claude-forge" "$HOME/.cargo/bin/claude-forge" "$HERE/target/release/claude-forge"; do
+    [ -x "$cand" ] && CLAUDE_FORGE="$cand" && break
+  done
+fi
+
+# Best-effort sync; never block forge from starting if it fails.
+if [ -n "$CLAUDE_FORGE" ]; then
+  "$CLAUDE_FORGE" sync || echo "[claude-forge] sync skipped (non-fatal)" >&2
+else
+  echo "[claude-forge] binary not found — skipping sync" >&2
+fi
 
 exec "$REAL_FORGE" "$@"
